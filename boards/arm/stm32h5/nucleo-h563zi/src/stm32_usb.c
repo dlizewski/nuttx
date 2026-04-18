@@ -244,11 +244,4 @@ void stm32h5_usbhost_vbusdrive(int port, bool enable)
 }
 #endif
 
-// #if defined(CONFIG_USBHOST_CDCECM) && !defined(CONFIG_STM32H5_ETHMAC)
-// void arm_netinitialize(void)
-// {
-//   /* CDC-ECM uses */
-// }
-// #endif
-
 #endif /* CONFIG_STM32H5_USBFS_HOST */
