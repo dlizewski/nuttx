@@ -237,8 +237,8 @@ void stm32h5_usbhost_vbusdrive(int port, bool enable)
   /* The Nucleo-h563zi doesn't have hardware for a vbus drive.
    * Instead to get host working, you need to put an extra jumper
    * on the "PWR SEL" to jump "STLK" and "USB USER".
-   * This effectively supplies 5V power form the STLink to the USB device.
-   * The power output is limited so only relatively low power
+   * This effectively supplies 5V power from the STLink to the USB device.
+   * The power output is limited, so only relatively low power
    * devices can work.
    */
 }

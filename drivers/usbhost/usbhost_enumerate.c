@@ -297,7 +297,6 @@ int usbhost_enumerate(FAR struct usbhost_hubport_s *hport,
   uint8_t funcaddr = 0;
   uint8_t nconfigs = 0;
   uint8_t cfgidx;
-  int     bound = 0;
   FAR uint8_t *buffer = NULL;
   int ret;
 
@@ -421,8 +420,6 @@ int usbhost_enumerate(FAR struct usbhost_hubport_s *hport,
 
   usbhost_devdesc((struct usb_devdesc_s *)buffer, &id);
 
-  /* Save the number of configurations before the buffer is reused */
-
   nconfigs = ((struct usb_devdesc_s *)buffer)->nconfigs;
 
   /* Assign a function address to the device connected to this port */
@@ -461,161 +458,147 @@ int usbhost_enumerate(FAR struct usbhost_hubport_s *hport,
   DRVR_EP0CONFIGURE(hport->drvr, hport->ep0, hport->funcaddr,
                     hport->speed, maxpacketsize);
 
-  /* Iterate through all device configurations to find one that a class
-   * driver can bind to.  Some devices (e.g., RTL8153) expose multiple
-   * configurations -- a vendor-specific one and a standard CDC-ECM one.
+  /* Get the configuration descriptor (only), cfgidx == 0.  Should not be
+   * hard-coded! More logic is needed in order to handle devices with
+   * multiple configurations.
+   */
+  cfgidx = nconfigs-1;
+
+  ctrlreq->type = USB_REQ_DIR_IN | USB_REQ_RECIPIENT_DEVICE;
+  ctrlreq->req  = USB_REQ_GETDESCRIPTOR;
+  usbhost_putle16(ctrlreq->value, (USB_DESC_TYPE_CONFIG << 8) | cfgidx);
+  usbhost_putle16(ctrlreq->index, 0);
+  usbhost_putle16(ctrlreq->len, USB_SIZEOF_CFGDESC);
+
+  ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq, buffer);
+  if (ret < 0)
+    {
+      uerr("ERROR: Failed to get configuration descriptor, length=%d: %d\n",
+           USB_SIZEOF_CFGDESC, ret);
+      goto errout;
+    }
+
+  /* Extract the full size of the configuration data */
+
+  cfglen = (unsigned int)
+           usbhost_getle16(((struct usb_cfgdesc_s *)buffer)->totallen);
+  uinfo("sizeof config data: %d\n", cfglen);
+
+  if (cfglen > maxlen)
+    {
+      uerr("ERROR: Configuration doesn't fit in buffer, "
+           "length=%d, maxlen=%zu\n",
+           cfglen, maxlen);
+      ret = -E2BIG;
+      goto errout;
+    }
+
+  /* Get all of the configuration descriptor data, cfgidx == 0 (Should not be
+   * hard-coded!)
    */
 
-  for (cfgidx = 0; cfgidx < nconfigs; cfgidx++)
+  ctrlreq->type = USB_REQ_DIR_IN | USB_REQ_RECIPIENT_DEVICE;
+  ctrlreq->req  = USB_REQ_GETDESCRIPTOR;
+  usbhost_putle16(ctrlreq->value, (USB_DESC_TYPE_CONFIG << 8) | cfgidx);
+  usbhost_putle16(ctrlreq->index, 0);
+  usbhost_putle16(ctrlreq->len, cfglen);
+
+  ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq, buffer);
+  if (ret < 0)
     {
-      /* Get the configuration descriptor (only) at index cfgidx */
+      uerr("ERROR: Failed to get configuration descriptor, length=%d: %d\n",
+           cfglen, ret);
+      goto errout;
+    }
 
-      ctrlreq->type = USB_REQ_DIR_IN | USB_REQ_RECIPIENT_DEVICE;
-      ctrlreq->req  = USB_REQ_GETDESCRIPTOR;
-      usbhost_putle16(ctrlreq->value,
-                      (USB_DESC_TYPE_CONFIG << 8) | cfgidx);
-      usbhost_putle16(ctrlreq->index, 0);
-      usbhost_putle16(ctrlreq->len, USB_SIZEOF_CFGDESC);
+  /* Select this configuration using its bConfigurationValue */
 
-      ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq, buffer);
-      if (ret < 0)
-        {
-          uerr("ERROR: Failed to get configuration descriptor %d,"
-               " length=%d: %d\n", cfgidx, USB_SIZEOF_CFGDESC, ret);
-          continue;
-        }
+  ctrlreq->type = USB_REQ_DIR_OUT | USB_REQ_RECIPIENT_DEVICE;
+  ctrlreq->req  = USB_REQ_SETCONFIGURATION;
+  usbhost_putle16(ctrlreq->value, ((struct usb_cfgdesc_s *)buffer)->cfgvalue);
+  usbhost_putle16(ctrlreq->index, 0);
+  usbhost_putle16(ctrlreq->len, 0);
 
-      /* Extract the full size of the configuration data */
+  ret = DRVR_CTRLOUT(hport->drvr, hport->ep0, ctrlreq, NULL);
+  if (ret < 0)
+    {
+      uerr("ERROR: Failed to set configuration: %d\n", ret);
+      goto errout;
+    }
 
-      cfglen = (unsigned int)
-               usbhost_getle16(((struct usb_cfgdesc_s *)buffer)->totallen);
-      uinfo("sizeof config data: %d\n", cfglen);
+  /* Some devices may require some delay before initialization */
 
-      if (cfglen > maxlen)
-        {
-          uerr("ERROR: Configuration %d doesn't fit in buffer, "
-               "length=%d, maxlen=%zu\n", cfgidx, cfglen, maxlen);
-          continue;
-        }
+  nxsched_usleep(100 * 1000);
 
-      /* Get all of the configuration descriptor data */
+  /* Was the class identification information provided in the device
+   * descriptor? Or do we need to find it in the interface descriptor(s)?
+   */
 
-      ctrlreq->type = USB_REQ_DIR_IN | USB_REQ_RECIPIENT_DEVICE;
-      ctrlreq->req  = USB_REQ_GETDESCRIPTOR;
-      usbhost_putle16(ctrlreq->value,
-                      (USB_DESC_TYPE_CONFIG << 8) | cfgidx);
-      usbhost_putle16(ctrlreq->index, 0);
-      usbhost_putle16(ctrlreq->len, cfglen);
-
-      ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq, buffer);
-      if (ret < 0)
-        {
-          uerr("ERROR: Failed to get configuration descriptor %d,"
-               " length=%d: %d\n", cfgidx, cfglen, ret);
-          continue;
-        }
-
-      /* Select this configuration using its bConfigurationValue */
-
-      ctrlreq->type = USB_REQ_DIR_OUT | USB_REQ_RECIPIENT_DEVICE;
-      ctrlreq->req  = USB_REQ_SETCONFIGURATION;
-      usbhost_putle16(ctrlreq->value,
-                      ((struct usb_cfgdesc_s *)buffer)->cfgvalue);
-      usbhost_putle16(ctrlreq->index, 0);
-      usbhost_putle16(ctrlreq->len, 0);
-
-      ret = DRVR_CTRLOUT(hport->drvr, hport->ep0, ctrlreq, NULL);
-      if (ret < 0)
-        {
-          uerr("ERROR: Failed to set configuration %d: %d\n", cfgidx, ret);
-          continue;
-        }
-
-      /* Some devices may require some delay before initialization */
-
-      nxsched_usleep(100 * 1000);
-
-      /* Was the class identification information provided in the device
-       * descriptor? Or do we need to find it in the interface
-       * descriptor(s)?
+  if (id.base == USB_CLASS_PER_INTERFACE)
+    {
+      /* Get the class identification information for this device from the
+       * interface descriptor(s).  Hmmm.. More logic is need to handle the
+       * case of multiple interface descriptors.
        */
 
-      if (id.base == USB_CLASS_PER_INTERFACE)
+      uint8_t ninterfaces = ((struct usb_cfgdesc_s *)buffer)->ninterfaces;
+      uint8_t ifnum = 0;
+
+      for (ifnum = 0; ifnum < ninterfaces; ifnum++)
         {
-          uint8_t ninterfaces =
-            ((struct usb_cfgdesc_s *)buffer)->ninterfaces;
-          uint8_t ifnum;
-          struct usbhost_id_s ifid;
-
-          for (ifnum = 0; ifnum < ninterfaces; ifnum++)
+          uinfo("Parsing interface: %d\n", ifnum);
+          ret = usbhost_configdesc(buffer, cfglen, ifnum, &ifnum, &id);
+          if (ret < 0)
             {
-              /* Preserve VID/PID from device descriptor for matching */
-
-              memcpy(&ifid, &id, sizeof(ifid));
-
-              uinfo("Parsing interface: %d\n", ifnum);
-              ret = usbhost_configdesc(buffer, cfglen, ifnum, &ifnum,
-                                       &ifid);
-              if (ret < 0)
-                {
-                  uerr("ERROR: usbhost_configdesc failed: %d\n", ret);
-                  continue;
-                }
-
-              ret = usbhost_classbind(hport, buffer, cfglen, &ifid,
-                                      devclass);
-              if (ret < 0)
-                {
-                  uerr("ERROR: usbhost_classbind failed %d\n", ret);
-                }
-              else
-                {
-                  bound = 1;
-                }
+              uerr("ERROR: usbhost_configdesc failed: %d\n", ret);
+              goto errout;
             }
 
-          if (bound)
+          ret = usbhost_classbind(hport, buffer, cfglen, &id, devclass);
+          if (ret < 0)
             {
-              break;
+              uerr("ERROR: usbhost_classbind failed %d\n", ret);
             }
+
+          ret = OK;
         }
-      else
-        {
+    }
+  else
+    {
 #ifdef CONFIG_USBHOST_COMPOSITE
-          /* Check if the device attached to the downstream port if a USB
-           * composite device and, if so, create the composite device
-           * wrapper and bind it to the HCD.
+      /* Check if the device attached to the downstream port if a USB
+       * composite device and, if so, create the composite device wrapper
+       * and bind it to the HCD.
+       *
+       * usbhost_composite() will return a negated errno value is on any
+       * failure.  The value -ENOENT, in particular means that the attached
+       * device is not a composite device.  Other values would indicate other
+       * various, unexpected failures.  We make no real distinction here.
+       */
+
+      ret = usbhost_composite(hport, buffer, cfglen, &id, devclass);
+      if (ret >= 0)
+        {
+          uinfo("usbhost_composite has bound the composite device\n");
+        }
+
+      /* Apparently this is not a composite device */
+
+      else
+#endif
+        {
+          /* Parse the configuration descriptor and bind to the class
+           * instance for the device.  This needs to be the last thing
+           * done because the class driver will begin configuring the
+           * device.
            */
 
-          ret = usbhost_composite(hport, buffer, cfglen, &id, devclass);
-          if (ret >= 0)
+          ret = usbhost_classbind(hport, buffer, cfglen, &id, devclass);
+          if (ret < 0)
             {
-              uinfo("usbhost_composite has bound the composite device\n");
-              bound = 1;
-              break;
-            }
-
-          /* Apparently this is not a composite device */
-
-          else
-#endif
-            {
-              ret = usbhost_classbind(hport, buffer, cfglen, &id,
-                                      devclass);
-              if (ret >= 0)
-                {
-                  bound = 1;
-                  break;
-                }
-
               uerr("ERROR: usbhost_classbind failed %d\n", ret);
             }
         }
-    }
-
-  if (!bound)
-    {
-      ret = -EINVAL;
     }
 
 errout:

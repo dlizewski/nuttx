@@ -561,14 +561,17 @@ static void usbhost_notification_work(FAR void *arg)
               {
                 case ECM_NETWORK_CONNECTION:
 
-                  /* Link state changed */
+                  /* Link state changed. This is supposed to be sent only
+                   * on-change, but I found some devices send it repeatedly.
+                   * So only update on-change to avoid a spam of prints
+                   */
 
-                  if (inmsg->value[0])
+                  if (inmsg->value[0] && !IFF_IS_RUNNING(priv->netdev.d_flags))
                   {
                     uinfo("Network connected\n");
                     netdev_carrier_on(&priv->netdev);
                   }
-                  else
+                  else if (!inmsg->value[0] && IFF_IS_RUNNING(priv->netdev.d_flags))
                   {
                     uinfo("Network disconnected\n");
                     netdev_carrier_off(&priv->netdev);
